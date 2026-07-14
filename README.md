@@ -157,6 +157,14 @@ docker run --rm \
 | `RabbitMQ__Password` | Senha de acesso ao RabbitMQ | `guest` |
 | `ConnectionStrings__DefaultConnection` | Endereço e credenciais do banco de dados SQL Server | `Server=localhost,1433;Database=catalog;...` |
 | `JwtSettings__SecretKey` | Chave secreta usada para validar o "crachá digital" (JWT) do usuário | `tech-challenge-fase-2-fcg-chave-secreta-jwt-256bits-minimo` |
+| `JwtSettings__Issuer` | Quem deve ter emitido o token (comparado com o `iss` do JWT) | `FCG.Catalog.Api` |
+| `JwtSettings__Audience` | Para quem o token precisa ter sido emitido (comparado com o `aud` do JWT) | `FCG.Catalog.Client` |
+
+> **Acoplamento com o serviço de Usuários:** este serviço só valida (não emite) tokens JWT — quem
+> emite é o [`FCG.Usuario`](../techchallenge_fase2_user). `SecretKey`, `Issuer` e `Audience` têm
+> que ser **idênticos** dos dois lados, senão toda chamada autenticada recebe `401`. Isso já é
+> garantido hoje em cada ambiente — ver a nota equivalente no README do Usuario (seção 5) para o
+> detalhe de por que `Issuer`/`Audience` mudam de valor entre k8s/local e `docker-compose`.
 
 > No Docker/Kubernetes, essas variáveis são escritas com **duplo underscore**
 > (`RABBITMQ__HOST`), que é a forma como o .NET entende "seção : chave" vindo de variáveis de
@@ -197,6 +205,10 @@ dotnet test FCG.Catalog.Tests
 
 ## 8. Limitações conhecidas
 
+- **Chave de assinatura JWT versionada em texto claro** no `appsettings.json` e no
+  `k8s/secret.yaml` (Secret do Kubernetes usa apenas base64, que **não é criptografia**). Aceitável
+  para demonstração/FIAP; num deploy real, viria de um secret manager. Mesma chave é compartilhada
+  com o serviço de Usuários — ver seção 5.
 - A aprovação/rejeição do pagamento é decidida pelo serviço de Pagamentos **por sorteio
   aleatório** — não há integração com gateway de pagamento real.
 - Eventos que falham na validação são descartados com um log de aviso — não há retry automático
