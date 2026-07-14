@@ -1,0 +1,41 @@
+using FCG.Catalog.Api.Consumers;
+using FCG.Catalog.Domain.Dto;
+using MassTransit;
+
+namespace FCG.Catalog.Api.Extensions;
+
+public static class MassTransitExtension
+{
+    public static IServiceCollection AddMassTransitWithRabbitMQ(this IServiceCollection services, IConfiguration configuration)
+    {
+        var host = configuration["RabbitMQ:Host"] ?? "localhost";
+        var virtualHost = configuration["RabbitMQ:VirtualHost"] ?? "/";
+        var username = configuration["RabbitMQ:Username"] ?? "guest";
+        var password = configuration["RabbitMQ:Password"] ?? "guest";
+
+        services.AddMassTransit(bus =>
+        {
+            bus.SetEndpointNameFormatter(new KebabCaseEndpointNameFormatter("catalog", false));
+
+            bus.AddConsumer<PaymentProcessedEventConsumer>();
+
+            bus.UsingRabbitMq((context, cfg) =>
+            {
+                cfg.Host(host, virtualHost, rabbitHost =>
+                {
+                    rabbitHost.Username(username);
+                    rabbitHost.Password(password);
+                });
+
+                cfg.UseRawJsonSerializer(RawSerializerOptions.All, isDefault: true);
+
+                cfg.Message<OrderPlacedEvent>(msgCfg => msgCfg.SetEntityName("order-placed-event"));
+                cfg.Message<PaymentProcessedEvent>(msgCfg => msgCfg.SetEntityName("payment-processed-event"));
+
+                cfg.ConfigureEndpoints(context);
+            });
+        });
+
+        return services;
+    }
+}

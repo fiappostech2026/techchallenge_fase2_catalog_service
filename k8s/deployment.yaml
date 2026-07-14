@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-api
+  template:
+    metadata:
+      labels:
+        app: catalog-api
+    spec:
+      containers:
+        - name: catalog-api
+          image: fcg-catalog-api:latest
+          env:
+            - name: RABBITMQ__HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: RABBITMQ__HOST
+            - name: RABBITMQ__VIRTUALHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: RABBITMQ__VIRTUALHOST
+            - name: RABBITMQ__USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secret
+                  key: RABBITMQ__USERNAME
+            - name: RABBITMQ__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secret
+                  key: RABBITMQ__PASSWORD
+            - name: ConnectionStrings__DefaultConnection
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secret
+                  key: ConnectionStrings__DefaultConnection
+            - name: JwtSettings__SecretKey
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-secret
+                  key: JwtSettings__SecretKey
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
