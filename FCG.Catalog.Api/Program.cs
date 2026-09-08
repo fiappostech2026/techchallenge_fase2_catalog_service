@@ -1,5 +1,6 @@
 using FCG.Catalog.Api.Extensions;
 using FCG.Catalog.Infra.Context;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,9 +18,11 @@ var app = builder.Build();
 app.MigrateDatabase();
 app.UseErrorHandling();
 app.UseSwaggerConfig();
+app.UseHttpMetrics();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHealthChecks("/healthz");
+app.MapMetrics();
 
 app.Run();
