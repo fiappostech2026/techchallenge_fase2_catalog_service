@@ -14,9 +14,11 @@ public static class DependencyInjectionExtension
         services.AddScoped<IGameService, GameService>();
         services.AddScoped<IPurchaseService, PurchaseService>();
         services.AddScoped<ILibraryService, LibraryService>();
+        services.AddScoped<IReviewService, ReviewService>();
 
         services.AddScoped<IGameRepository, GameRepository>();
         services.AddScoped<ILibraryRepository, LibraryRepository>();
+        services.AddScoped<IReviewRepository, ReviewRepository>();
 
         services.AddValidatorsFromAssemblyContaining<GameRequestValidator>();
 

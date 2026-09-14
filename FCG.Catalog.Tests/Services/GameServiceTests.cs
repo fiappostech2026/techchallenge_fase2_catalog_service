@@ -1,5 +1,6 @@
 using FCG.Catalog.Domain.Dto;
 using FCG.Catalog.Domain.Entities;
+using FCG.Catalog.Domain.Interfaces;
 using FCG.Catalog.Domain.Interfaces.IRepository;
 using FCG.Catalog.Domain.Services;
 using Moq;
@@ -13,7 +14,8 @@ public sealed class GameServiceTests
     public async Task CreateAsync_ValidRequest_PersistsAndReturnsEchoedResponse()
     {
         var repository = new Mock<IGameRepository>();
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
         var request = new GameRequest { Title = "Elden Ring", Description = "Action RPG", Price = 59.99m, Genre = "RPG" };
 
         var result = await sut.CreateAsync(request);
@@ -31,7 +33,8 @@ public sealed class GameServiceTests
     public async Task CreateAsync_NullRequest_ThrowsArgumentNullException_RepositoryUntouched()
     {
         var repository = new Mock<IGameRepository>();
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => sut.CreateAsync(null!));
 
@@ -42,7 +45,8 @@ public sealed class GameServiceTests
     public async Task CreateAsync_TitleWithFiveThousandCharacters_StillDelegatesToRepository()
     {
         var repository = new Mock<IGameRepository>();
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
         var request = new GameRequest { Title = new string('a', 5000), Description = "desc", Price = 10m, Genre = "Genre" };
 
         await sut.CreateAsync(request);
@@ -56,7 +60,8 @@ public sealed class GameServiceTests
         var existing = new Game { Title = "Old", Description = "Old desc", Price = 1m, Genre = "Old genre" };
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(existing.Id)).ReturnsAsync(existing);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
         var request = new GameRequest { Title = "New", Description = "New desc", Price = 2m, Genre = "New genre" };
 
         var result = await sut.UpdateAsync(existing.Id, request);
@@ -71,7 +76,8 @@ public sealed class GameServiceTests
     {
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(It.IsAny<Guid>())).ReturnsAsync((Game?)null);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
         var request = new GameRequest { Title = "New", Price = 2m };
 
         var result = await sut.UpdateAsync(Guid.NewGuid(), request);
@@ -84,7 +90,8 @@ public sealed class GameServiceTests
     public async Task UpdateAsync_ValidIdNullRequest_ThrowsArgumentNullException()
     {
         var repository = new Mock<IGameRepository>();
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => sut.UpdateAsync(Guid.NewGuid(), null!));
     }
@@ -95,7 +102,8 @@ public sealed class GameServiceTests
         var existing = new Game { Title = "Game" };
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(existing.Id)).ReturnsAsync(existing);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.DeleteAsync(existing.Id);
 
@@ -108,7 +116,8 @@ public sealed class GameServiceTests
     {
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(It.IsAny<Guid>())).ReturnsAsync((Game?)null);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.DeleteAsync(Guid.NewGuid());
 
@@ -121,7 +130,8 @@ public sealed class GameServiceTests
     {
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(Guid.Empty)).ReturnsAsync((Game?)null);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.DeleteAsync(Guid.Empty);
 
@@ -134,7 +144,8 @@ public sealed class GameServiceTests
         var existing = new Game { Title = "Game", Price = 9.99m };
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(existing.Id)).ReturnsAsync(existing);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.GetByIdAsync(existing.Id);
 
@@ -148,7 +159,8 @@ public sealed class GameServiceTests
     {
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(It.IsAny<Guid>())).ReturnsAsync((Game?)null);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.GetByIdAsync(Guid.NewGuid());
 
@@ -160,10 +172,69 @@ public sealed class GameServiceTests
     {
         var repository = new Mock<IGameRepository>();
         repository.Setup(r => r.ObterPorIdAsync(Guid.Empty)).ReturnsAsync((Game?)null);
-        var sut = new GameService(repository.Object);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
 
         var result = await sut.GetByIdAsync(Guid.Empty);
 
         Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_CacheHit_ReturnsCachedList_RepositoryNeverCalled()
+    {
+        var cachedList = new List<GameResponse> { new() { Title = "Cached Game" } };
+        var repository = new Mock<IGameRepository>();
+        var cache = new Mock<ICacheService>();
+        cache.Setup(c => c.GetAsync<List<GameResponse>>("catalog:games:all")).ReturnsAsync(cachedList);
+        var sut = new GameService(repository.Object, cache.Object);
+
+        var result = await sut.GetAllAsync();
+
+        Assert.Same(cachedList, result);
+        repository.Verify(r => r.ObterTodosAsync(), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetAllAsync_CacheMiss_QueriesRepositoryAndPopulatesCache()
+    {
+        var games = new List<Game> { new() { Title = "Hades" } };
+        var repository = new Mock<IGameRepository>();
+        repository.Setup(r => r.ObterTodosAsync()).ReturnsAsync(games);
+        var cache = new Mock<ICacheService>();
+        cache.Setup(c => c.GetAsync<List<GameResponse>>("catalog:games:all")).ReturnsAsync((List<GameResponse>?)null);
+        var sut = new GameService(repository.Object, cache.Object);
+
+        var result = await sut.GetAllAsync();
+
+        Assert.Single(result);
+        cache.Verify(c => c.SetAsync("catalog:games:all", It.IsAny<List<GameResponse>>(), TimeSpan.FromSeconds(60)), Times.Once);
+    }
+
+    [Fact]
+    public async Task CreateAsync_ValidRequest_InvalidatesGamesListCache()
+    {
+        var repository = new Mock<IGameRepository>();
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
+        var request = new GameRequest { Title = "New Game", Price = 10m };
+
+        await sut.CreateAsync(request);
+
+        cache.Verify(c => c.RemoveAsync("catalog:games:all"), Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ExistingId_InvalidatesGamesListCache()
+    {
+        var existing = new Game { Title = "Game" };
+        var repository = new Mock<IGameRepository>();
+        repository.Setup(r => r.ObterPorIdAsync(existing.Id)).ReturnsAsync(existing);
+        var cache = new Mock<ICacheService>();
+        var sut = new GameService(repository.Object, cache.Object);
+
+        await sut.DeleteAsync(existing.Id);
+
+        cache.Verify(c => c.RemoveAsync("catalog:games:all"), Times.Once);
     }
 }

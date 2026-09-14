@@ -6,6 +6,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Host.AddSerilog();
 builder.AddDatabase();
+builder.AddMongo();
+builder.AddRedisCache();
 builder.AddJwt();
 builder.AddSwagger();
 builder.Services.AddDependencies();

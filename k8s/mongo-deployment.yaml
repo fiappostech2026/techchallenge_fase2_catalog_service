@@ -1,0 +1,29 @@
+# MongoDB dedicado ao CatalogAPI (guarda as avaliações de jogos — dado
+# flexível, sem schema fixo). Segue o mesmo padrão do SQL Server: mora
+# aqui, dentro do repositório do próprio microsserviço, porque ninguém
+# mais usa este banco.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-mongo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-mongo
+  template:
+    metadata:
+      labels:
+        app: catalog-mongo
+    spec:
+      containers:
+        - name: catalog-mongo
+          image: mongo:7
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: catalog-mongo-data
+              mountPath: /data/db
+      volumes:
+        - name: catalog-mongo-data
+          emptyDir: {}

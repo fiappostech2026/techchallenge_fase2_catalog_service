@@ -47,6 +47,21 @@ spec:
                 secretKeyRef:
                   name: catalog-secret
                   key: JwtSettings__SecretKey
+            - name: Mongo__ConnectionString
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: Mongo__ConnectionString
+            - name: Mongo__Database
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: Mongo__Database
+            - name: Redis__ConnectionString
+              valueFrom:
+                configMapKeyRef:
+                  name: catalog-config
+                  key: Redis__ConnectionString
           livenessProbe:
             httpGet:
               path: /healthz

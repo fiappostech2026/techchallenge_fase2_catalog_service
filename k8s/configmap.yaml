@@ -6,3 +6,6 @@ data:
   RABBITMQ__HOST: "rabbitmq"
   RABBITMQ__VIRTUALHOST: "/"
   ACCEPT_EULA: "Y"
+  Mongo__ConnectionString: "mongodb://catalog-mongo:27017"
+  Mongo__Database: "catalog_reviews"
+  Redis__ConnectionString: "catalog-redis:6379"

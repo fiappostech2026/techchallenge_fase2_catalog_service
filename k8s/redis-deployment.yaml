@@ -1,0 +1,22 @@
+# Redis dedicado ao CatalogAPI (cache da listagem de jogos). Sem volume:
+# cache é dado descartável por natureza, se o Pod reiniciar o cache
+# esvazia e a próxima leitura só recalcula a partir do SQL Server.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-redis
+  template:
+    metadata:
+      labels:
+        app: catalog-redis
+    spec:
+      containers:
+        - name: catalog-redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379

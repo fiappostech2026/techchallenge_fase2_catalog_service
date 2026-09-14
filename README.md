@@ -21,7 +21,7 @@ sistemas (como um site ou aplicativo) se conectam diretamente nele para consulta
 compras e ver a biblioteca de um usuário. Ele também guarda seus próprios dados em um banco de
 dados (SQL Server), assim como o serviço de Usuários.
 
-Ele oferece três grupos de funcionalidades:
+Ele oferece quatro grupos de funcionalidades:
 
 1. **Catálogo de jogos** — listar, consultar, cadastrar, atualizar e remover jogos. Consultar é
    liberado para qualquer um; cadastrar, atualizar e remover exigem estar autenticado (login).
@@ -29,6 +29,8 @@ Ele oferece três grupos de funcionalidades:
    o pedido e avisa o resto do sistema para que o pagamento seja processado.
 3. **Biblioteca do usuário** — consultar quais jogos um usuário já possui, depois de compras
    aprovadas.
+4. **Avaliações de jogos** — qualquer usuário autenticado pode avaliar um jogo (nota de 1 a 5 +
+   comentário livre); consultar as avaliações é público. Ver seção 9.
 
 ### O fluxo de compra, passo a passo
 
@@ -92,22 +94,25 @@ namespace), então a correspondência é feita pela estrutura do JSON, não pelo
 ```
 FCG.Catalog/
 ├── FCG.Catalog.Domain/           # regras de negócio (não sabe nada sobre banco/RabbitMQ/Web)
-│   ├── Dto/                       # formato dos eventos e das requisições (GameRequest, PurchaseRequest...)
-│   ├── Entities/                  # Game, LibraryItem — o que é salvo no banco
+│   ├── Dto/                       # formato dos eventos e das requisições (GameRequest, ReviewRequest...)
+│   ├── Entities/                  # Game, LibraryItem, Review — o que é salvo no banco
 │   ├── Enums/                     # PaymentStatus (Approved, Rejected)
-│   ├── Interfaces/IRepository/    # contratos de acesso a dados
+│   ├── Interfaces/                # ICacheService (contrato do cache, sem saber que é Redis)
+│   ├── Interfaces/IRepository/    # contratos de acesso a dados (SQL Server e MongoDB)
 │   ├── Interfaces/IService/       # contratos dos serviços
-│   ├── Services/                  # regras de catálogo, compra e biblioteca
+│   ├── Services/                  # regras de catálogo, compra, biblioteca e avaliações
 │   └── Validators/                # validação das requisições (FluentValidation)
-├── FCG.Catalog.Infra/             # acesso a dados (Entity Framework Core + SQL Server)
-│   ├── Config/                     # mapeamento das entidades para tabelas
-│   ├── Context/                    # CatalogContext — a conexão com o banco
-│   ├── Migrations/                 # histórico de alterações no banco
-│   └── Repository/                 # implementação do acesso a dados
+├── FCG.Catalog.Infra/             # acesso a dados e infraestrutura
+│   ├── Config/                     # mapeamento das entidades EF Core para tabelas (SQL Server)
+│   ├── Context/                    # CatalogContext — a conexão com o SQL Server
+│   ├── Migrations/                 # histórico de alterações no banco relacional
+│   ├── Mongo/                      # mapeamento da entidade Review para o MongoDB
+│   ├── Cache/                      # implementação do cache (RedisCacheService)
+│   └── Repository/                 # implementação do acesso a dados (SQL Server e MongoDB)
 ├── FCG.Catalog.Api/                # ponto de entrada do programa (API HTTP)
-│   ├── Controllers/                 # GamesController, PurchasesController, LibraryController
+│   ├── Controllers/                 # GamesController, PurchasesController, LibraryController, ReviewsController
 │   ├── Consumers/                   # "ouvintes" dos eventos do RabbitMQ (PaymentProcessedEvent)
-│   ├── Extensions/                  # configuração (banco, JWT, RabbitMQ, Swagger, logs)
+│   ├── Extensions/                  # configuração (banco, Mongo, Redis, JWT, RabbitMQ, Swagger, logs)
 │   ├── Middleware/                  # tratamento de erros
 │   └── Program.cs                   # arquivo que liga tudo e inicia o serviço
 ├── FCG.Catalog.Tests/              # testes automatizados
@@ -159,6 +164,9 @@ docker run --rm \
 | `JwtSettings__SecretKey` | Chave secreta usada para validar o "crachá digital" (JWT) do usuário | `tech-challenge-fase-2-fcg-chave-secreta-jwt-256bits-minimo` |
 | `JwtSettings__Issuer` | Quem deve ter emitido o token (comparado com o `iss` do JWT) | `FCG.Catalog.Api` |
 | `JwtSettings__Audience` | Para quem o token precisa ter sido emitido (comparado com o `aud` do JWT) | `FCG.Catalog.Client` |
+| `Mongo__ConnectionString` | Endereço do MongoDB (guarda as avaliações de jogos) | `mongodb://localhost:27017` |
+| `Mongo__Database` | Nome do banco dentro do MongoDB | `catalog_reviews` |
+| `Redis__ConnectionString` | Endereço do Redis (cache da listagem de jogos) | `localhost:6379` |
 
 > **Acoplamento com o serviço de Usuários:** este serviço só valida (não emite) tokens JWT — quem
 > emite é o [`FCG.Usuario`](../techchallenge_fase2_user). `SecretKey`, `Issuer` e `Audience` têm
@@ -184,6 +192,10 @@ Os manifestos estão na pasta `/k8s` deste repositório:
 | `secret.yaml` | Guarda usuário/senha do RabbitMQ, a string de conexão do banco e a chave do JWT (dados sensíveis) |
 | `sqlserver-deployment.yaml` | Sobe o banco de dados SQL Server usado por este serviço |
 | `sqlserver-service.yaml` | Dá o nome de rede `catalog-sqlserver` para este serviço achar o banco |
+| `mongo-deployment.yaml` | Sobe o MongoDB usado para guardar as avaliações de jogos |
+| `mongo-service.yaml` | Dá o nome de rede `catalog-mongo` para este serviço achar o Mongo |
+| `redis-deployment.yaml` | Sobe o Redis usado como cache da listagem de jogos |
+| `redis-service.yaml` | Dá o nome de rede `catalog-redis` para este serviço achar o Redis |
 
 Para aplicar:
 
@@ -203,7 +215,42 @@ kubectl apply -f k8s/
 dotnet test FCG.Catalog.Tests
 ```
 
-## 8. Limitações conhecidas
+---
+
+## 8. NoSQL (MongoDB) e cache de persistência (Redis)
+
+Além do SQL Server (dados estruturados: jogos, biblioteca), este serviço usa mais dois bancos,
+cada um resolvendo um problema diferente:
+
+### MongoDB — avaliações de jogos
+
+Um banco de dados **SQL** (como o SQL Server) exige que toda linha de uma tabela tenha as mesmas
+colunas. Um banco **NoSQL** como o MongoDB guarda "documentos" (parecido com JSON) sem essa
+exigência — cada avaliação é salva como está, sem precisar de uma tabela rígida. Foi escolhido
+porque "avaliação de jogo" é um exemplo clássico de dado que pode variar (nem todo comentário tem
+o mesmo tamanho ou os mesmos campos) e porque isolar esse dado do SQL Server evita mexer no schema
+já existente do catálogo.
+
+| Rota | Autenticação | O que faz |
+|---|---|---|
+| `POST /api/v1/games/{gameId}/reviews` | Exige login (JWT) | Cria uma avaliação (nota 1-5 + comentário) para o jogo |
+| `GET /api/v1/games/{gameId}/reviews` | Pública | Lista as avaliações daquele jogo |
+
+### Redis — cache da listagem de jogos
+
+`GET /api/v1/games` é uma consulta que muita gente faz (alta leitura) e que muda pouco (baixa
+escrita) — candidata perfeita para cache. O serviço aplica o padrão **cache-aside**:
+
+1. Chega um pedido de listagem → primeiro pergunta ao Redis se já tem a resposta guardada.
+2. Se tiver (*cache hit*), devolve na hora, sem tocar no SQL Server.
+3. Se não tiver (*cache miss*), busca no SQL Server, devolve, e guarda a resposta no Redis por
+   60 segundos.
+4. Sempre que um jogo é criado, atualizado ou removido, o cache é apagado na hora (não espera os
+   60 segundos) — assim ninguém vê uma lista desatualizada logo após uma mudança.
+
+---
+
+## 9. Limitações conhecidas
 
 - **Chave de assinatura JWT versionada em texto claro** no `appsettings.json` e no
   `k8s/secret.yaml` (Secret do Kubernetes usa apenas base64, que **não é criptografia**). Aceitável
@@ -213,6 +260,9 @@ dotnet test FCG.Catalog.Tests
   aleatório** — não há integração com gateway de pagamento real.
 - Eventos que falham na validação são descartados com um log de aviso — não há retry automático
   nem fila de mensagens mortas (*dead-letter queue*) configurada.
+- **MongoDB e Redis rodam sem autenticação** (sem usuário/senha) — mesmo padrão de simplicidade
+  já usado pelo RabbitMQ (`guest`/`guest`) neste projeto. Aceitável para demonstração/FIAP; num
+  deploy real, os dois teriam autenticação e não ficariam com a porta acessível de qualquer lugar.
 - Compras duplicadas são barradas em **duas camadas**: (1) na entrada, o `POST /api/v1/purchases`
   recusa com `409` (`"Você já possui esse jogo em sua biblioteca."`) antes mesmo de publicar
   qualquer evento; (2) como rede de segurança, se ainda assim o mesmo `PaymentProcessedEvent`

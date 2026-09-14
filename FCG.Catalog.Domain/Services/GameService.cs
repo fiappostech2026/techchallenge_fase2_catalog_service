@@ -1,5 +1,6 @@
 using FCG.Catalog.Domain.Dto;
 using FCG.Catalog.Domain.Entities;
+using FCG.Catalog.Domain.Interfaces;
 using FCG.Catalog.Domain.Interfaces.IRepository;
 using FCG.Catalog.Domain.Interfaces.IService;
 
@@ -7,13 +8,19 @@ namespace FCG.Catalog.Domain.Services;
 
 public sealed class GameService : IGameService
 {
-    private readonly IGameRepository _gameRepository;
+    private const string GamesListCacheKey = "catalog:games:all";
+    private static readonly TimeSpan GamesListCacheTtl = TimeSpan.FromSeconds(60);
 
-    public GameService(IGameRepository gameRepository)
+    private readonly IGameRepository _gameRepository;
+    private readonly ICacheService _cacheService;
+
+    public GameService(IGameRepository gameRepository, ICacheService cacheService)
     {
         ArgumentNullException.ThrowIfNull(gameRepository);
+        ArgumentNullException.ThrowIfNull(cacheService);
 
         _gameRepository = gameRepository;
+        _cacheService = cacheService;
     }
 
     private static GameResponse MapToResponse(Game game) => new()
@@ -39,6 +46,7 @@ public sealed class GameService : IGameService
 
         await _gameRepository.AdicionarAsync(game);
         await _gameRepository.SalvarAlteracoesAsync();
+        await _cacheService.RemoveAsync(GamesListCacheKey);
 
         return MapToResponse(game);
     }
@@ -52,9 +60,16 @@ public sealed class GameService : IGameService
 
     public async Task<IEnumerable<GameResponse>> GetAllAsync()
     {
-        var games = await _gameRepository.ObterTodosAsync();
+        var cached = await _cacheService.GetAsync<List<GameResponse>>(GamesListCacheKey);
+        if (cached is not null)
+            return cached;
 
-        return games.Select(MapToResponse);
+        var games = await _gameRepository.ObterTodosAsync();
+        var response = games.Select(MapToResponse).ToList();
+
+        await _cacheService.SetAsync(GamesListCacheKey, response, GamesListCacheTtl);
+
+        return response;
     }
 
     public async Task<GameResponse?> UpdateAsync(Guid id, GameRequest request)
@@ -72,6 +87,7 @@ public sealed class GameService : IGameService
 
         await _gameRepository.AtualizarAsync(game);
         await _gameRepository.SalvarAlteracoesAsync();
+        await _cacheService.RemoveAsync(GamesListCacheKey);
 
         return MapToResponse(game);
     }
@@ -84,6 +100,7 @@ public sealed class GameService : IGameService
 
         await _gameRepository.ExcluirAsync(game);
         await _gameRepository.SalvarAlteracoesAsync();
+        await _cacheService.RemoveAsync(GamesListCacheKey);
 
         return true;
     }
