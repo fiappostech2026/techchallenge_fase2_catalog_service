@@ -21,7 +21,7 @@ sistemas (como um site ou aplicativo) se conectam diretamente nele para consulta
 compras e ver a biblioteca de um usuário. Ele também guarda seus próprios dados em um banco de
 dados (SQL Server), assim como o serviço de Usuários.
 
-Ele oferece quatro grupos de funcionalidades:
+Ele oferece cinco grupos de funcionalidades:
 
 1. **Catálogo de jogos** — listar, consultar, cadastrar, atualizar e remover jogos. Consultar é
    liberado para qualquer um; cadastrar, atualizar e remover exigem estar autenticado (login).
@@ -30,7 +30,9 @@ Ele oferece quatro grupos de funcionalidades:
 3. **Biblioteca do usuário** — consultar quais jogos um usuário já possui, depois de compras
    aprovadas.
 4. **Avaliações de jogos** — qualquer usuário autenticado pode avaliar um jogo (nota de 1 a 5 +
-   comentário livre); consultar as avaliações é público. Ver seção 9.
+   comentário livre); consultar as avaliações é público. Ver seção 8.
+5. **Busca avançada de jogos** — procurar jogos por texto, mesmo com erros de digitação
+   ("zeldda" encontra "Zelda"), com os resultados mais relevantes primeiro. Ver seção 9.
 
 ### O fluxo de compra, passo a passo
 
@@ -94,10 +96,11 @@ namespace), então a correspondência é feita pela estrutura do JSON, não pelo
 ```
 FCG.Catalog/
 ├── FCG.Catalog.Domain/           # regras de negócio (não sabe nada sobre banco/RabbitMQ/Web)
-│   ├── Dto/                       # formato dos eventos e das requisições (GameRequest, ReviewRequest...)
+│   ├── Dto/                       # formato dos eventos, requisições e respostas (GameRequest, GameSearchResult...)
 │   ├── Entities/                  # Game, LibraryItem, Review — o que é salvo no banco
 │   ├── Enums/                     # PaymentStatus (Approved, Rejected)
-│   ├── Interfaces/                # ICacheService (contrato do cache, sem saber que é Redis)
+│   ├── Interfaces/                # ICacheService e ISearchService (contratos do cache e da busca,
+│   │                              #   sem saber que por trás estão o Redis e o Elasticsearch)
 │   ├── Interfaces/IRepository/    # contratos de acesso a dados (SQL Server e MongoDB)
 │   ├── Interfaces/IService/       # contratos dos serviços
 │   ├── Services/                  # regras de catálogo, compra, biblioteca e avaliações
@@ -108,16 +111,21 @@ FCG.Catalog/
 │   ├── Migrations/                 # histórico de alterações no banco relacional
 │   ├── Mongo/                      # mapeamento da entidade Review para o MongoDB
 │   ├── Cache/                      # implementação do cache (RedisCacheService)
+│   ├── Search/                     # implementação da busca (ElasticsearchService + ElasticsearchSettings)
 │   └── Repository/                 # implementação do acesso a dados (SQL Server e MongoDB)
 ├── FCG.Catalog.Api/                # ponto de entrada do programa (API HTTP)
 │   ├── Controllers/                 # GamesController, PurchasesController, LibraryController, ReviewsController
 │   ├── Consumers/                   # "ouvintes" dos eventos do RabbitMQ (PaymentProcessedEvent)
-│   ├── Extensions/                  # configuração (banco, Mongo, Redis, JWT, RabbitMQ, Swagger, logs)
+│   ├── Extensions/                  # configuração (banco, Mongo, Redis, Elasticsearch, JWT, RabbitMQ, Swagger, logs)
 │   ├── Middleware/                  # tratamento de erros
 │   └── Program.cs                   # arquivo que liga tudo e inicia o serviço
 ├── FCG.Catalog.Tests/              # testes automatizados
 ├── k8s/                             # manifestos de deploy no Kubernetes (ver seção 6)
-└── Dockerfile                       # receita para empacotar este serviço em um container
+│   ├── secret.yaml.example          # MODELO do Secret (sem valores reais) — o secret.yaml de verdade não vai para o Git
+│   └── local/elasticsearch.yaml     # Elasticsearch dentro do cluster, só para uso local / plano B
+├── azure-pipelines.yml              # pipeline de CI/CD no Azure DevOps (ver seção 10)
+├── Dockerfile                       # receita para empacotar este serviço em um container
+└── .dockerignore                    # o que NÃO entra na imagem (bin/, obj/, k8s/, logs/...)
 ```
 
 ---
@@ -125,13 +133,34 @@ FCG.Catalog/
 ## 4. Como rodar sozinho (sem os outros microsserviços)
 
 Você pode rodar este serviço isolado, desde que tenha um RabbitMQ e um SQL Server disponíveis —
-útil para testar sem precisar subir o projeto inteiro.
+útil para testar sem precisar subir o projeto inteiro. (MongoDB, Redis e Elasticsearch também são
+usados; sem o Elasticsearch a API sobe normalmente, só a busca da seção 9 fica indisponível.)
+
+> **Senhas e chaves não ficam mais no código.** O `appsettings.json` não traz a senha do banco, a
+> chave do JWT nem usuário/senha do RabbitMQ. Antes de rodar, você precisa informar esses valores
+> por fora — senão a API **nem inicia** (ela para logo na subida com o erro
+> `JwtSettings:SecretKey não configurada.`). Há duas formas: o `dotnet user-secrets` (um "cofre"
+> local do .NET, guardado fora da pasta do projeto) ou variáveis de ambiente.
 
 ### Opção A — via .NET direto (para quem tem o SDK instalado)
+
+Na primeira vez, guarde os segredos no cofre local (troque os valores entre `<...>`):
+
+```bash
+dotnet user-secrets set "JwtSettings:SecretKey" "<mesma-chave-jwt-do-servico-de-usuarios>" --project FCG.Catalog.Api
+dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Server=localhost,1433;Database=catalog;User Id=sa;Password=<senha-do-sa>;TrustServerCertificate=True" --project FCG.Catalog.Api
+```
+
+Depois, é só rodar:
 
 ```bash
 dotnet run --project FCG.Catalog.Api
 ```
+
+> O cofre do `user-secrets` só é lido quando a API roda no ambiente `Development` (que é o padrão do
+> `dotnet run`, via `Properties/launchSettings.json`). Se preferir, os mesmos valores podem ser
+> passados como variáveis de ambiente (`JwtSettings__SecretKey`, `ConnectionStrings__DefaultConnection`).
+> Usuário/senha do RabbitMQ, se não forem informados, ficam no padrão `guest`/`guest`.
 
 ### Opção B — via Docker
 
@@ -139,10 +168,15 @@ dotnet run --project FCG.Catalog.Api
 docker build -t fcg-catalog-api:latest .
 docker run --rm \
   -e RABBITMQ__HOST=host.docker.internal \
-  -e ConnectionStrings__DefaultConnection="Server=host.docker.internal,1433;Database=catalog;User Id=sa;Password=Catalog@Strong!Pass1;TrustServerCertificate=True" \
+  -e ConnectionStrings__DefaultConnection="Server=host.docker.internal,1433;Database=catalog;User Id=sa;Password=<senha-do-sa>;TrustServerCertificate=True" \
+  -e JwtSettings__SecretKey="<mesma-chave-jwt-do-servico-de-usuarios>" \
+  -e Elasticsearch__Url=http://host.docker.internal:9200 \
   -p 5002:8080 \
   fcg-catalog-api:latest
 ```
+
+> A imagem roda com um **usuário sem privilégios de administrador** (não-root), uma boa prática de
+> segurança: mesmo que alguém explore uma falha na aplicação, ele não "manda" no container.
 
 > Para rodar o sistema completo (com RabbitMQ, o banco de dados e os serviços de Pagamentos e
 > Notificações juntos, prontos para o fluxo de compra funcionar de ponta a ponta), use o
@@ -154,19 +188,32 @@ docker run --rm \
 
 ## 5. Variáveis de ambiente
 
-| Variável | Descrição | Valor padrão (local) |
-|---|---|---|
-| `RabbitMQ__Host` | Endereço do servidor RabbitMQ | `localhost` |
-| `RabbitMQ__VirtualHost` | "Vhost" (espaço isolado) do RabbitMQ a usar | `/` |
-| `RabbitMQ__Username` | Usuário de acesso ao RabbitMQ | `guest` |
-| `RabbitMQ__Password` | Senha de acesso ao RabbitMQ | `guest` |
-| `ConnectionStrings__DefaultConnection` | Endereço e credenciais do banco de dados SQL Server | `Server=localhost,1433;Database=catalog;...` |
-| `JwtSettings__SecretKey` | Chave secreta usada para validar o "crachá digital" (JWT) do usuário | `tech-challenge-fase-2-fcg-chave-secreta-jwt-256bits-minimo` |
-| `JwtSettings__Issuer` | Quem deve ter emitido o token (comparado com o `iss` do JWT) | `FCG.Catalog.Api` |
-| `JwtSettings__Audience` | Para quem o token precisa ter sido emitido (comparado com o `aud` do JWT) | `FCG.Catalog.Client` |
-| `Mongo__ConnectionString` | Endereço do MongoDB (guarda as avaliações de jogos) | `mongodb://localhost:27017` |
-| `Mongo__Database` | Nome do banco dentro do MongoDB | `catalog_reviews` |
-| `Redis__ConnectionString` | Endereço do Redis (cache da listagem de jogos) | `localhost:6379` |
+A coluna **Segredo?** indica o que é dado sensível. Esses valores **não têm padrão no código** (ou
+têm só um padrão de laboratório) e, no Kubernetes, ficam no Secret `catalog-secret` — nunca no Git.
+
+| Variável | Descrição | Valor padrão (local) | Segredo? |
+|---|---|---|---|
+| `RabbitMQ__Host` | Endereço do servidor RabbitMQ | `localhost` | Sim (no k8s fica no Secret) |
+| `RabbitMQ__VirtualHost` | "Vhost" (espaço isolado) do RabbitMQ a usar | `/` | Sim (no k8s fica no Secret) |
+| `RabbitMQ__Port` | Porta do RabbitMQ (opcional; vazio = porta padrão) | — | Sim (no k8s fica no Secret) |
+| `RabbitMQ__UseSsl` | Se a conexão com o RabbitMQ é criptografada (ex.: CloudAMQP) | `false` | Sim (no k8s fica no Secret) |
+| `RabbitMQ__Username` | Usuário de acesso ao RabbitMQ | `guest` (padrão do código) | **Sim** |
+| `RabbitMQ__Password` | Senha de acesso ao RabbitMQ | `guest` (padrão do código) | **Sim** |
+| `ConnectionStrings__DefaultConnection` | Endereço e credenciais do banco de dados SQL Server | sem padrão — informar via user-secrets/variável | **Sim** |
+| `JwtSettings__SecretKey` | Chave secreta usada para validar o "crachá digital" (JWT) do usuário | sem padrão — **obrigatória**, a API não sobe sem ela | **Sim** |
+| `JwtSettings__Issuer` | Quem deve ter emitido o token (comparado com o `iss` do JWT) | `FCG.Catalog.Api` | Não |
+| `JwtSettings__Audience` | Para quem o token precisa ter sido emitido (comparado com o `aud` do JWT) | `FCG.Catalog.Client` | Não |
+| `Mongo__ConnectionString` | Endereço do MongoDB (guarda as avaliações de jogos) | `mongodb://localhost:27017` | Não |
+| `Mongo__Database` | Nome do banco dentro do MongoDB | `catalog_reviews` | Não |
+| `Redis__ConnectionString` | Endereço do Redis (cache da listagem de jogos) | `localhost:6379` | Não |
+| `Elasticsearch__Url` | Endereço do Elasticsearch (busca avançada) | `http://localhost:9200` | Sim (no k8s fica no Secret) |
+| `Elasticsearch__ApiKey` | Chave de acesso ao Elastic Cloud (produção); vazia localmente, onde o Elasticsearch roda sem senha | vazio | **Sim** |
+| `Elasticsearch__IndexName` | Nome do "índice" (a "gaveta") onde os jogos ficam guardados para busca | `catalog-games` | Não |
+
+> **Onde ficam os segredos em cada ambiente:** rodando local com `dotnet run` → `dotnet
+> user-secrets` ou variáveis de ambiente (seção 4); no Kubernetes local (Docker Desktop) → um
+> `k8s/secret.yaml` copiado de `k8s/secret.yaml.example` e que não vai para o Git; no AKS
+> (produção) → criado pela pipeline a partir dos Variable Groups do Azure DevOps (seção 10).
 
 > **Acoplamento com o serviço de Usuários:** este serviço só valida (não emite) tokens JWT — quem
 > emite é o [`FCG.Usuario`](../techchallenge_fase2_user). `SecretKey`, `Issuer` e `Audience` têm
@@ -186,33 +233,87 @@ Os manifestos estão na pasta `/k8s` deste repositório:
 
 | Arquivo | O que faz |
 |---|---|
-| `deployment.yaml` | Sobe o container deste serviço, reiniciando sozinho se cair |
+| `deployment.yaml` | Sobe o container deste serviço em **2 cópias** (réplicas), reiniciando sozinho se cair |
 | `service.yaml` | Dá o nome de rede `catalog-api` para outros serviços acharem este |
-| `configmap.yaml` | Guarda o endereço do RabbitMQ (não são segredos) |
-| `secret.yaml` | Guarda usuário/senha do RabbitMQ, a string de conexão do banco e a chave do JWT (dados sensíveis) |
-| `sqlserver-deployment.yaml` | Sobe o banco de dados SQL Server usado por este serviço |
+| `configmap.yaml` | Guarda as configurações que **não** são segredo (endereços do Mongo e do Redis, nome do índice de busca...) |
+| `secret.yaml.example` | **Modelo** do Secret `catalog-secret`, com `<...>` no lugar dos valores reais: senha do SQL Server, string de conexão, chave do JWT, dados do RabbitMQ (host, vhost, porta, SSL, usuário, senha) e do Elasticsearch (URL, API Key) |
+| `sqlserver-deployment.yaml` | Sobe o banco de dados SQL Server usado por este serviço, com disco persistente |
 | `sqlserver-service.yaml` | Dá o nome de rede `catalog-sqlserver` para este serviço achar o banco |
-| `mongo-deployment.yaml` | Sobe o MongoDB usado para guardar as avaliações de jogos |
+| `mongo-deployment.yaml` | Sobe o MongoDB usado para guardar as avaliações de jogos, com disco persistente |
 | `mongo-service.yaml` | Dá o nome de rede `catalog-mongo` para este serviço achar o Mongo |
-| `redis-deployment.yaml` | Sobe o Redis usado como cache da listagem de jogos |
+| `redis-deployment.yaml` | Sobe o Redis usado como cache da listagem de jogos (sem disco: cache pode ser perdido) |
 | `redis-service.yaml` | Dá o nome de rede `catalog-redis` para este serviço achar o Redis |
+| `local/elasticsearch.yaml` | Sobe um Elasticsearch **dentro do cluster** — só para uso local ou como plano B (a pipeline não aplica este arquivo) |
 
-Para aplicar:
+### O Secret não fica mais no Git
+
+O arquivo `k8s/secret.yaml` (com as senhas de verdade) **saiu do repositório** e está no
+`.gitignore`. No lugar dele existe o `k8s/secret.yaml.example`, que é só um modelo. Isso importa
+porque o Secret do Kubernetes guarda os dados apenas em base64, que **não é criptografia** — se o
+arquivo estivesse no Git, qualquer um com acesso ao repositório leria as senhas.
+
+- **No AKS (produção):** quem cria o Secret é a pipeline, a cada deploy, com os valores guardados
+  no Azure DevOps (ver seção 10). Ninguém precisa mexer nesse arquivo.
+- **No Kubernetes local (Docker Desktop):** copie o modelo, preencha e aplique:
 
 ```bash
+cp k8s/secret.yaml.example k8s/secret.yaml   # preencha os valores <...>
+kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/
 ```
 
-> **Pré-requisito:** o RabbitMQ precisa já estar rodando no cluster com o nome de Service
-> `rabbitmq` — ele é definido no repositório
-> [`FCG.Orchestration`](../FCG.Orchestration).
+Para ter a busca funcionando localmente sem o Elastic Cloud, suba também o Elasticsearch de
+laboratório e aponte `Elasticsearch__Url` para ele no seu `secret.yaml`
+(`http://catalog-elasticsearch:9200`, deixando `Elasticsearch__ApiKey` vazio):
+
+```bash
+kubectl apply -f k8s/local/elasticsearch.yaml
+```
+
+### Atualização sem tirar o serviço do ar (Rolling Update)
+
+Como a API roda em **2 réplicas**, uma versão nova é trocada aos poucos: o Kubernetes sobe **1 Pod
+novo por vez** (`maxSurge: 1`) e só derruba um antigo depois que o novo responde "estou pronto" no
+`/healthz` (`maxUnavailable: 0`). Ou seja, durante a troca sempre há pelo menos 2 cópias atendendo.
+Cada cópia também tem um limite de CPU e memória (`resources`), para que um problema numa delas não
+consuma o servidor inteiro.
+
+### Bancos com disco persistente (PVC)
+
+SQL Server e MongoDB guardam os dados num **disco persistente** (`PersistentVolumeClaim`): se o Pod
+do banco reiniciar, os dados continuam lá. No AKS esse disco vira um disco gerenciado do Azure; no
+Docker Desktop, uma pasta do computador. Como um disco desses só pode ser usado por um Pod de cada
+vez, esses dois bancos são atualizados com a estratégia `Recreate` (desliga o antigo e só depois
+liga o novo), e não com Rolling Update.
+
+> **Imagem do container:** o `deployment.yaml` aponta para `fcg-catalog-api:latest`, que serve para
+> rodar local. Na pipeline, esse valor é trocado automaticamente pela imagem publicada no Azure
+> Container Registry com o número da execução, por exemplo `fcgacr.azurecr.io/fcg-catalog-api:42`
+> — assim dá para saber exatamente qual versão está no ar.
+
+> **Pré-requisito:** o RabbitMQ precisa estar acessível no endereço informado em `RABBITMQ__HOST`
+> no Secret — seja o RabbitMQ do cluster (Service `rabbitmq`, definido no repositório
+> [`FCG.Orchestration`](../FCG.Orchestration)), seja um RabbitMQ externo.
 
 ---
 
 ## 7. Testes
 
+São **55 testes unitários**, que conferem as regras de negócio sem precisar de banco, RabbitMQ,
+Redis ou Elasticsearch de verdade (esses são substituídos por "dublês" nos testes). Entre eles estão
+os testes da busca: o jogo é indexado ao ser criado/atualizado, removido do índice ao ser apagado,
+um termo de busca vazio não chega a consultar o Elasticsearch, o tamanho pedido é limitado entre 1
+e 50, e a reindexação envia todos os jogos do banco.
+
 ```bash
 dotnet test FCG.Catalog.Tests
+```
+
+Para gerar também o relatório de **cobertura de código** (quanto do código os testes exercitam),
+como a pipeline faz:
+
+```bash
+dotnet test FCG.Catalog.Tests --collect "XPlat Code Coverage"
 ```
 
 ---
@@ -250,19 +351,171 @@ escrita) — candidata perfeita para cache. O serviço aplica o padrão **cache-
 
 ---
 
-## 9. Limitações conhecidas
+## 9. Busca avançada de jogos (Elasticsearch)
 
-- **Chave de assinatura JWT versionada em texto claro** no `appsettings.json` e no
-  `k8s/secret.yaml` (Secret do Kubernetes usa apenas base64, que **não é criptografia**). Aceitável
-  para demonstração/FIAP; num deploy real, viria de um secret manager. Mesma chave é compartilhada
-  com o serviço de Usuários — ver seção 5.
+### Por que não buscar direto no SQL Server?
+
+Um banco SQL é ótimo para guardar dados com segurança, mas é ruim em "busca do jeito que gente
+digita". Se alguém procurar por `zeldda breth` (com erros de digitação), uma consulta comum no SQL
+Server não encontra nada. O **Elasticsearch** é um motor de busca feito exatamente para isso — é a
+mesma ideia da caixa de busca de uma loja online:
+
+- **Tolera erros de digitação** (busca *fuzzy*): `zeldda breth` encontra *The Legend of Zelda:
+  Breath of the Wild*, e `mrio` encontra *Super Mario Odyssey*. A regra (`fuzziness: AUTO`) aceita
+  até 1 letra errada em palavras de 3 a 5 letras e até 2 em palavras maiores. A primeira letra
+  precisa estar certa (`prefix_length: 1`), o que evita resultados muito aleatórios.
+- **Procura em vários campos ao mesmo tempo** (título, gênero e descrição), dando **pesos**
+  diferentes: acertar no título vale 3 vezes mais, no gênero 2 vezes mais do que na descrição.
+- **Ordena por relevância**: os jogos que mais combinam com o que foi digitado vêm primeiro. Cada
+  resultado traz um campo `score` (a "nota de relevância" calculada pelo Elasticsearch).
+
+### Quem manda nos dados: SQL Server
+
+O SQL Server **continua sendo a fonte da verdade** — o Elasticsearch é só uma "cópia para busca"
+(um índice chamado `catalog-games`). Ele é mantido em dia assim:
+
+1. Sempre que um jogo é **criado ou atualizado**, ele é enviado (indexado) ao Elasticsearch logo
+   depois de ser salvo no SQL Server.
+2. Sempre que um jogo é **removido**, ele também é retirado do índice.
+3. Se o Elasticsearch recusar uma dessas operações, o problema é **registrado no log** e o
+   cadastro no SQL Server segue normalmente — a escrita principal não é desfeita por causa da busca.
+4. **Toda vez que a API inicia**, ela garante que o índice existe e o reconstrói a partir de todos
+   os jogos do SQL Server. Assim, depois de um deploy novo ou de um índice apagado, a busca volta
+   completa sozinha. Se o Elasticsearch estiver fora do ar nesse momento, a API **sobe mesmo assim**
+   — só a busca fica indisponível.
+5. Também é possível pedir a reconstrução do índice a qualquer momento pela rota de reindexação
+   (abaixo).
+
+### Rotas
+
+| Rota | Autenticação | O que faz |
+|---|---|---|
+| `GET /api/v1/games/search?q=<texto>&size=<n>` | Pública | Busca jogos pelo texto `q`. `size` é quantos resultados devolver (padrão 10, mínimo 1, máximo 50). Se `q` vier vazio, responde `400` |
+| `POST /api/v1/games/search/reindex` | Exige login (JWT) | Reconstrói o índice de busca a partir de todos os jogos do SQL Server e diz quantos foram indexados |
+
+### Exemplos com `curl`
+
+Buscar, mesmo digitando errado (porta `5002`, como no exemplo do Docker da seção 4):
+
+```bash
+curl "http://localhost:5002/api/v1/games/search?q=zeldda%20breth"
+curl "http://localhost:5002/api/v1/games/search?q=mrio&size=5"
+```
+
+A resposta é uma lista de jogos, do mais relevante para o menos relevante:
+
+```json
+[
+  {
+    "id": "…",
+    "title": "The Legend of Zelda: Breath of the Wild",
+    "description": "…",
+    "price": 299.90,
+    "genre": "…",
+    "score": 7.4
+  }
+]
+```
+
+(os valores de `id`, `price`, `genre` e `score` acima são ilustrativos)
+
+Reconstruir o índice (precisa de um token JWT válido, obtido no login do serviço de Usuários):
+
+```bash
+curl -X POST "http://localhost:5002/api/v1/games/search/reindex" \
+  -H "Authorization: Bearer <seu-token-jwt>"
+# resposta: { "indexados": <quantidade de jogos> }
+```
+
+### Onde o Elasticsearch roda
+
+- **Produção (AKS):** no **Elastic Cloud**, o serviço gerenciado da própria Elastic. A API se
+  conecta com `Elasticsearch__Url` + `Elasticsearch__ApiKey`, que ficam no Secret (seção 5).
+- **Local:** um Elasticsearch sem senha, seja em container, seja pelo manifesto
+  `k8s/local/elasticsearch.yaml` (seção 6). Nesse caso `Elasticsearch__ApiKey` fica vazio.
+
+---
+
+## 10. CI/CD — pipeline no Azure DevOps
+
+O arquivo `azure-pipelines.yml` descreve a "esteira" automática que leva o código até produção.
+Funciona assim:
+
+```
+push na main ──► Build & Test ──► Imagem (build + scan + push no ACR) ──► Deploy no AKS
+Pull Request ──► só Build & Test (valida antes do merge)
+```
+
+Ou seja: o que está na branch `main` é exatamente o que está rodando em produção. (Mudanças só no
+`README.md` não disparam a pipeline.)
+
+### O que cada etapa faz
+
+1. **Build & Test** — roda em todo push na `main` e também em todo **Pull Request**. Compila a
+   solução (`dotnet build`), roda os testes unitários (`dotnet test`) e publica no Azure DevOps o
+   resultado dos testes e o relatório de cobertura de código. Se algum teste falhar, a esteira para
+   aqui.
+2. **Imagem Docker** — só na `main` (não em Pull Request). Monta a imagem do container com uma tag
+   única, o número da execução (`$(Build.BuildId)`); passa a imagem pelo **Trivy**, um "antivírus"
+   que lista vulnerabilidades conhecidas de gravidade alta ou crítica (`HIGH`/`CRITICAL`) — hoje ele
+   **só reporta**, não bloqueia a esteira; e por fim envia a imagem ao **Azure Container Registry
+   (ACR)**, o "depósito" de imagens no Azure.
+3. **Deploy no AKS** — só na `main`. Fica registrado no *environment* `fcg-production` do Azure
+   DevOps (onde dá para ver o histórico de deploys e, se quiser, exigir aprovação manual). Ele:
+   1. cria/atualiza o Secret `catalog-secret` com os valores guardados no Azure DevOps (nada vem do Git);
+   2. aplica o ConfigMap e os manifestos do SQL Server, MongoDB, Redis e o Service da API;
+   3. aplica o `deployment.yaml` trocando a imagem pela recém-publicada no ACR — isso dispara o
+      Rolling Update (seção 6);
+   4. espera até 5 minutos (`kubectl rollout status`) para todos os Pods novos ficarem prontos;
+   5. **se algo der errado, faz rollback automático** (`kubectl rollout undo`), voltando para a
+      versão anterior. Como os Pods antigos nunca saíram do ar (`maxUnavailable: 0`), o usuário não
+      percebe a falha.
+
+### O que precisa existir no Azure DevOps
+
+**Variable Groups** (em *Pipelines > Library*). As variáveis com senha devem ser marcadas como
+secretas (cadeado); os grupos também podem ser ligados a um Azure Key Vault.
+
+| Grupo | Variáveis |
+|---|---|
+| `fcg-shared-secrets` (compartilhado com os outros serviços) | `jwt-secret-key`, `rabbitmq-host`, `rabbitmq-vhost`, `rabbitmq-port`, `rabbitmq-use-ssl`, `rabbitmq-user`, `rabbitmq-password` |
+| `fcg-catalog-secrets` (só deste serviço) | `catalog-sql-password`, `elasticsearch-url`, `elasticsearch-api-key` |
+
+**Outros itens**, cujos nomes estão no topo do `azure-pipelines.yml` (ajuste se os seus forem
+diferentes):
+
+| Variável no YAML | Valor atual | O que é |
+|---|---|---|
+| `azureServiceConnection` | `fcg-azure` | Service connection do tipo *Azure Resource Manager* (em *Project settings > Service connections*) |
+| `acrName` | `fcgacr` | Nome do Azure Container Registry (sem `.azurecr.io`) |
+| `aksResourceGroup` | `rg-fcg` | Resource group onde está o cluster AKS |
+| `aksClusterName` | `aks-fcg` | Nome do cluster AKS |
+
+Além disso, o *environment* `fcg-production` (em *Pipelines > Environments*) é usado pela etapa de
+Deploy.
+
+---
+
+## 11. Limitações conhecidas
+
 - A aprovação/rejeição do pagamento é decidida pelo serviço de Pagamentos **por sorteio
   aleatório** — não há integração com gateway de pagamento real.
 - Eventos que falham na validação são descartados com um log de aviso — não há retry automático
   nem fila de mensagens mortas (*dead-letter queue*) configurada.
-- **MongoDB e Redis rodam sem autenticação** (sem usuário/senha) — mesmo padrão de simplicidade
-  já usado pelo RabbitMQ (`guest`/`guest`) neste projeto. Aceitável para demonstração/FIAP; num
-  deploy real, os dois teriam autenticação e não ficariam com a porta acessível de qualquer lugar.
+- **MongoDB e Redis rodam sem autenticação** (sem usuário/senha). Aceitável para
+  demonstração/FIAP; num deploy real, os dois teriam autenticação e não ficariam com a porta
+  acessível de qualquer lugar. O mesmo vale para o Elasticsearch de laboratório
+  (`k8s/local/elasticsearch.yaml`) — o de produção (Elastic Cloud) exige API Key.
+- **SQL Server, MongoDB e Redis rodam como Pods dentro do próprio cluster**, e não como serviços
+  gerenciados do Azure (Azure SQL, Cosmos DB, Azure Cache for Redis). Os dados do SQL Server e do
+  MongoDB ficam em disco persistente, mas cada banco tem **uma única cópia** — sem réplica, backup
+  automático ou failover. Num ambiente real, o caminho natural seria trocar por serviços gerenciados.
+- O **scan de vulnerabilidades (Trivy)** da pipeline só **reporta** os problemas encontrados; ele
+  não impede o deploy de uma imagem vulnerável (dá para mudar isso trocando `--exit-code 0` por
+  `--exit-code 1` no `azure-pipelines.yml`).
+- Os **segredos não estão mais no código** (foram para `user-secrets`, Secret do Kubernetes e
+  Variable Groups do Azure DevOps — seções 4, 5 e 10), mas a mesma chave JWT continua
+  **compartilhada** com o serviço de Usuários, então trocar a chave exige atualizar os dois.
 - Compras duplicadas são barradas em **duas camadas**: (1) na entrada, o `POST /api/v1/purchases`
   recusa com `409` (`"Você já possui esse jogo em sua biblioteca."`) antes mesmo de publicar
   qualquer evento; (2) como rede de segurança, se ainda assim o mesmo `PaymentProcessedEvent`

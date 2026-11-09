@@ -8,6 +8,7 @@ builder.Host.AddSerilog();
 builder.AddDatabase();
 builder.AddMongo();
 builder.AddRedisCache();
+builder.AddElasticsearch();
 builder.AddJwt();
 builder.AddSwagger();
 builder.Services.AddDependencies();
@@ -18,6 +19,7 @@ builder.Services.AddHealthChecks().AddDbContextCheck<CatalogContext>();
 var app = builder.Build();
 
 app.MigrateDatabase();
+await app.InitializeSearchIndexAsync();
 app.UseErrorHandling();
 app.UseSwaggerConfig();
 app.UseHttpMetrics();

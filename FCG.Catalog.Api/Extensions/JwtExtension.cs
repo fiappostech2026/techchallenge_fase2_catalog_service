@@ -9,7 +9,11 @@ public static class JwtExtension
     public static WebApplicationBuilder AddJwt(this WebApplicationBuilder builder)
     {
         var jwtSettings = builder.Configuration.GetSection("JwtSettings");
-        var secretKey = jwtSettings["SecretKey"]!;
+        // A chave nunca fica no código: vem do Secret do Kubernetes (JwtSettings__SecretKey)
+        // ou do dotnet user-secrets em desenvolvimento.
+        var secretKey = jwtSettings["SecretKey"];
+        if (string.IsNullOrWhiteSpace(secretKey))
+            throw new InvalidOperationException("JwtSettings:SecretKey não configurada.");
 
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>

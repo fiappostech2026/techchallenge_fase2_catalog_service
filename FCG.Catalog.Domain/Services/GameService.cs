@@ -10,17 +10,21 @@ public sealed class GameService : IGameService
 {
     private const string GamesListCacheKey = "catalog:games:all";
     private static readonly TimeSpan GamesListCacheTtl = TimeSpan.FromSeconds(60);
+    private const int MaxSearchSize = 50;
 
     private readonly IGameRepository _gameRepository;
     private readonly ICacheService _cacheService;
+    private readonly ISearchService _searchService;
 
-    public GameService(IGameRepository gameRepository, ICacheService cacheService)
+    public GameService(IGameRepository gameRepository, ICacheService cacheService, ISearchService searchService)
     {
         ArgumentNullException.ThrowIfNull(gameRepository);
         ArgumentNullException.ThrowIfNull(cacheService);
+        ArgumentNullException.ThrowIfNull(searchService);
 
         _gameRepository = gameRepository;
         _cacheService = cacheService;
+        _searchService = searchService;
     }
 
     private static GameResponse MapToResponse(Game game) => new()
@@ -48,7 +52,10 @@ public sealed class GameService : IGameService
         await _gameRepository.SalvarAlteracoesAsync();
         await _cacheService.RemoveAsync(GamesListCacheKey);
 
-        return MapToResponse(game);
+        var response = MapToResponse(game);
+        await _searchService.IndexAsync(response);
+
+        return response;
     }
 
     public async Task<GameResponse?> GetByIdAsync(Guid id)
@@ -89,7 +96,10 @@ public sealed class GameService : IGameService
         await _gameRepository.SalvarAlteracoesAsync();
         await _cacheService.RemoveAsync(GamesListCacheKey);
 
-        return MapToResponse(game);
+        var response = MapToResponse(game);
+        await _searchService.IndexAsync(response);
+
+        return response;
     }
 
     public async Task<bool> DeleteAsync(Guid id)
@@ -101,7 +111,26 @@ public sealed class GameService : IGameService
         await _gameRepository.ExcluirAsync(game);
         await _gameRepository.SalvarAlteracoesAsync();
         await _cacheService.RemoveAsync(GamesListCacheKey);
+        await _searchService.RemoveAsync(id);
 
         return true;
+    }
+
+    public async Task<int> ReindexAllAsync()
+    {
+        var games = await _gameRepository.ObterTodosAsync();
+        var response = games.Select(MapToResponse).ToList();
+
+        await _searchService.ReindexAsync(response);
+
+        return response.Count;
+    }
+
+    public async Task<IReadOnlyList<GameSearchResult>> SearchAsync(string term, int size)
+    {
+        if (string.IsNullOrWhiteSpace(term))
+            return [];
+
+        return await _searchService.SearchAsync(term.Trim(), Math.Clamp(size, 1, MaxSearchSize));
     }
 }

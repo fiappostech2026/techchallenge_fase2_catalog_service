@@ -1,0 +1,52 @@
+# Elasticsearch DENTRO do cluster — para desenvolvimento local (Docker Desktop)
+# ou como plano B. Em produção o CatalogAPI aponta para o Elastic Cloud
+# (serviço gerenciado, exigido pelo Tech Challenge) via Elasticsearch__Url e
+# Elasticsearch__ApiKey no Secret. A pipeline NÃO aplica esta pasta.
+#
+#   kubectl apply -f k8s/local/elasticsearch.yaml
+#   (e no secret local: Elasticsearch__Url = http://catalog-elasticsearch:9200)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-elasticsearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-elasticsearch
+  template:
+    metadata:
+      labels:
+        app: catalog-elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:9.2.0
+          ports:
+            - containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            # Sem autenticação: aceitável só porque o Service é ClusterIP (não sai do cluster).
+            - name: xpack.security.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-elasticsearch
+spec:
+  selector:
+    app: catalog-elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+  type: ClusterIP

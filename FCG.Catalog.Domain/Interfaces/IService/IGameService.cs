@@ -9,4 +9,6 @@ public interface IGameService
     Task<IEnumerable<GameResponse>> GetAllAsync();
     Task<GameResponse?> UpdateAsync(Guid id, GameRequest request);
     Task<bool> DeleteAsync(Guid id);
+    Task<IReadOnlyList<GameSearchResult>> SearchAsync(string term, int size);
+    Task<int> ReindexAllAsync();
 }

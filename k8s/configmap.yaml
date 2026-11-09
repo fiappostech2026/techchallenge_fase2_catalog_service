@@ -1,11 +1,13 @@
+# Somente configurações NÃO sensíveis. Tudo que é credencial ou endereço de
+# serviço externo (SQL, RabbitMQ/CloudAMQP, Elastic Cloud, JWT) fica no Secret
+# "catalog-secret" — ver secret.yaml.example.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: catalog-config
 data:
-  RABBITMQ__HOST: "rabbitmq"
-  RABBITMQ__VIRTUALHOST: "/"
   ACCEPT_EULA: "Y"
   Mongo__ConnectionString: "mongodb://catalog-mongo:27017"
   Mongo__Database: "catalog_reviews"
   Redis__ConnectionString: "catalog-redis:6379"
+  Elasticsearch__IndexName: "catalog-games"

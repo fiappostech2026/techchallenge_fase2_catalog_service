@@ -39,6 +39,42 @@ public sealed class GamesController : ControllerBase
         }
     }
 
+    // Busca no Elasticsearch (não no SQL Server): tolera erros de digitação (fuzzy)
+    // e devolve os jogos ordenados por relevância (campo "score").
+    [HttpGet("search")]
+    public async Task<IActionResult> Buscar([FromQuery] string q, [FromQuery] int size = 10)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(q))
+                return BadRequest("Informe o termo de busca no parâmetro 'q'.");
+
+            var results = await _gameService.SearchAsync(q, size);
+            return Ok(results);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Erro ao buscar jogos pelo termo {Termo}.", q);
+            throw;
+        }
+    }
+
+    [HttpPost("search/reindex")]
+    [Authorize]
+    public async Task<IActionResult> Reindexar()
+    {
+        try
+        {
+            var total = await _gameService.ReindexAllAsync();
+            return Ok(new { indexados = total });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Erro ao reindexar os jogos.");
+            throw;
+        }
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> ObterPorId(Guid id)
     {
