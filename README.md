@@ -123,7 +123,7 @@ FCG.Catalog/
 ├── k8s/                             # manifestos de deploy no Kubernetes (ver seção 6)
 │   ├── secret.yaml.example          # MODELO do Secret (sem valores reais) — o secret.yaml de verdade não vai para o Git
 │   └── local/elasticsearch.yaml     # Elasticsearch dentro do cluster, só para uso local / plano B
-├── azure-pipelines.yml              # pipeline de CI/CD no Azure DevOps (ver seção 10)
+├── .github/workflows/ci-cd.yml      # pipeline de CI/CD no GitHub Actions (ver seção 10)
 ├── Dockerfile                       # receita para empacotar este serviço em um container
 └── .dockerignore                    # o que NÃO entra na imagem (bin/, obj/, k8s/, logs/...)
 ```
@@ -213,7 +213,7 @@ têm só um padrão de laboratório) e, no Kubernetes, ficam no Secret `catalog-
 > **Onde ficam os segredos em cada ambiente:** rodando local com `dotnet run` → `dotnet
 > user-secrets` ou variáveis de ambiente (seção 4); no Kubernetes local (Docker Desktop) → um
 > `k8s/secret.yaml` copiado de `k8s/secret.yaml.example` e que não vai para o Git; no AKS
-> (produção) → criado pela pipeline a partir dos Variable Groups do Azure DevOps (seção 10).
+> (produção) → criado pela pipeline a partir dos Secrets do GitHub Actions (seção 10).
 
 > **Acoplamento com o serviço de Usuários:** este serviço só valida (não emite) tokens JWT — quem
 > emite é o [`FCG.Usuario`](../techchallenge_fase2_user). `SecretKey`, `Issuer` e `Audience` têm
@@ -253,7 +253,7 @@ porque o Secret do Kubernetes guarda os dados apenas em base64, que **não é cr
 arquivo estivesse no Git, qualquer um com acesso ao repositório leria as senhas.
 
 - **No AKS (produção):** quem cria o Secret é a pipeline, a cada deploy, com os valores guardados
-  no Azure DevOps (ver seção 10). Ninguém precisa mexer nesse arquivo.
+  nos Secrets do GitHub Actions (ver seção 10). Ninguém precisa mexer nesse arquivo.
 - **No Kubernetes local (Docker Desktop):** copie o modelo, preencha e aplique:
 
 ```bash
@@ -288,7 +288,7 @@ liga o novo), e não com Rolling Update.
 
 > **Imagem do container:** o `deployment.yaml` aponta para `fcg-catalog-api:latest`, que serve para
 > rodar local. Na pipeline, esse valor é trocado automaticamente pela imagem publicada no Azure
-> Container Registry com o número da execução, por exemplo `fcgacr.azurecr.io/fcg-catalog-api:42`
+> Container Registry com o número da execução, por exemplo `<ACR_NAME>.azurecr.io/fcg-catalog-api:42`
 > — assim dá para saber exatamente qual versão está no ar.
 
 > **Pré-requisito:** o RabbitMQ precisa estar acessível no endereço informado em `RABBITMQ__HOST`
@@ -436,14 +436,16 @@ curl -X POST "http://localhost:5002/api/v1/games/search/reindex" \
 
 ---
 
-## 10. CI/CD — pipeline no Azure DevOps
+## 10. CI/CD — pipeline no GitHub Actions
 
-O arquivo `azure-pipelines.yml` descreve a "esteira" automática que leva o código até produção.
-Funciona assim:
+O arquivo `.github/workflows/ci-cd.yml` descreve a "esteira" automática que leva o código até
+produção. Funciona assim:
 
 ```
 push na main ──► Build & Test ──► Imagem (build + scan + push no ACR) ──► Deploy no AKS
 Pull Request ──► só Build & Test (valida antes do merge)
+push na tech_fase_4 ──► mesmo fluxo (deploy de teste antes do merge na main)
+Run workflow (manual) ──► mesmo fluxo; só aparece depois que o workflow estiver na main
 ```
 
 Ou seja: o que está na branch `main` é exatamente o que está rodando em produção. (Mudanças só no
@@ -452,17 +454,17 @@ Ou seja: o que está na branch `main` é exatamente o que está rodando em produ
 ### O que cada etapa faz
 
 1. **Build & Test** — roda em todo push na `main` e também em todo **Pull Request**. Compila a
-   solução (`dotnet build`), roda os testes unitários (`dotnet test`) e publica no Azure DevOps o
-   resultado dos testes e o relatório de cobertura de código. Se algum teste falhar, a esteira para
-   aqui.
-2. **Imagem Docker** — só na `main` (não em Pull Request). Monta a imagem do container com uma tag
-   única, o número da execução (`$(Build.BuildId)`); passa a imagem pelo **Trivy**, um "antivírus"
-   que lista vulnerabilidades conhecidas de gravidade alta ou crítica (`HIGH`/`CRITICAL`) — hoje ele
+   solução (`dotnet build`), roda os testes unitários (`dotnet test`) e guarda o resultado dos
+   testes e o relatório de cobertura de código como *artifact* `TestResults` (dá para baixar na
+   página da execução, na aba *Actions*). Se algum teste falhar, a esteira para aqui.
+2. **Imagem Docker** — só fora de Pull Request. Monta a imagem do container com uma tag única, o
+   número da execução (`github.run_number`); passa a imagem pelo **Trivy**, um "antivírus" que
+   lista vulnerabilidades conhecidas de gravidade alta ou crítica (`HIGH`/`CRITICAL`) — hoje ele
    **só reporta**, não bloqueia a esteira; e por fim envia a imagem ao **Azure Container Registry
    (ACR)**, o "depósito" de imagens no Azure.
-3. **Deploy no AKS** — só na `main`. Fica registrado no *environment* `fcg-production` do Azure
-   DevOps (onde dá para ver o histórico de deploys e, se quiser, exigir aprovação manual). Ele:
-   1. cria/atualiza o Secret `catalog-secret` com os valores guardados no Azure DevOps (nada vem do Git);
+3. **Deploy no AKS** — só fora de Pull Request. Usa o *environment* `production` do GitHub (onde
+   dá para ver o histórico de deploys e, se quiser, exigir aprovação manual). Ele:
+   1. cria/atualiza o Secret `catalog-secret` com os valores guardados nos Secrets do GitHub (nada vem do Git);
    2. aplica o ConfigMap e os manifestos do SQL Server, MongoDB, Redis e o Service da API;
    3. aplica o `deployment.yaml` trocando a imagem pela recém-publicada no ACR — isso dispara o
       Rolling Update (seção 6);
@@ -471,28 +473,62 @@ Ou seja: o que está na branch `main` é exatamente o que está rodando em produ
       versão anterior. Como os Pods antigos nunca saíram do ar (`maxUnavailable: 0`), o usuário não
       percebe a falha.
 
-### O que precisa existir no Azure DevOps
+### Login no Azure sem senha (OIDC)
 
-**Variable Groups** (em *Pipelines > Library*). As variáveis com senha devem ser marcadas como
-secretas (cadeado); os grupos também podem ser ligados a um Azure Key Vault.
+A pipeline não guarda nenhuma senha do Azure. Em vez disso, usa **OIDC**: a cada execução, o
+GitHub emite um "crachá" temporário que prova "sou a pipeline deste repositório, rodando no
+*environment* `production`". O Azure foi configurado para confiar só nesse crachá (uma
+*credencial federada* numa *App Registration*, com o subject
+`repo:fiappostech2026/techchallenge_fase2_catalog_service:environment:production`). O crachá vale
+poucos minutos, então não há senha para vazar nem para renovar.
 
-| Grupo | Variáveis |
+Por isso os jobs de Imagem e Deploy usam `environment: production`: sem ele, o crachá teria outro
+subject e o Azure recusaria o login.
+
+### O que precisa existir no GitHub
+
+Tudo fica em *Settings > Secrets and variables > Actions* do repositório.
+
+**Secrets** (valores sensíveis — o GitHub esconde nos logs e ninguém consegue ler depois de salvos):
+
+| Secret | O que é |
 |---|---|
-| `fcg-shared-secrets` (compartilhado com os outros serviços) | `jwt-secret-key`, `rabbitmq-host`, `rabbitmq-vhost`, `rabbitmq-port`, `rabbitmq-use-ssl`, `rabbitmq-user`, `rabbitmq-password` |
-| `fcg-catalog-secrets` (só deste serviço) | `catalog-sql-password`, `elasticsearch-url`, `elasticsearch-api-key` |
+| `AZURE_CLIENT_ID` | ID (*Application/client ID*) da App Registration usada no login OIDC |
+| `AZURE_TENANT_ID` | ID do tenant (diretório) do Azure |
+| `AZURE_SUBSCRIPTION_ID` | ID da assinatura do Azure onde estão o ACR e o AKS |
+| `CATALOG_SQL_PASSWORD` | Senha do usuário `sa` do SQL Server deste serviço |
+| `JWT_SECRET_KEY` | Chave do JWT — a mesma do serviço de Usuários |
+| `RABBITMQ_HOST` | Endereço do RabbitMQ |
+| `RABBITMQ_VHOST` | Vhost do RabbitMQ (ex.: `/`) |
+| `RABBITMQ_PORT` | Porta do RabbitMQ (pode ficar vazio = porta padrão) |
+| `RABBITMQ_USE_SSL` | `true` ou `false` |
+| `RABBITMQ_USER` | Usuário do RabbitMQ |
+| `RABBITMQ_PASSWORD` | Senha do RabbitMQ |
+| `ELASTICSEARCH_URL` | Endereço do Elasticsearch (Elastic Cloud) |
+| `ELASTICSEARCH_API_KEY` | API Key do Elastic Cloud |
 
-**Outros itens**, cujos nomes estão no topo do `azure-pipelines.yml` (ajuste se os seus forem
-diferentes):
+**Variables** (nomes de infraestrutura, não são segredo):
 
-| Variável no YAML | Valor atual | O que é |
-|---|---|---|
-| `azureServiceConnection` | `fcg-azure` | Service connection do tipo *Azure Resource Manager* (em *Project settings > Service connections*) |
-| `acrName` | `fcgacr` | Nome do Azure Container Registry (sem `.azurecr.io`) |
-| `aksResourceGroup` | `rg-fcg` | Resource group onde está o cluster AKS |
-| `aksClusterName` | `aks-fcg` | Nome do cluster AKS |
+| Variable | O que é |
+|---|---|
+| `ACR_NAME` | Nome do Azure Container Registry (sem `.azurecr.io`) |
+| `AKS_RESOURCE_GROUP` | Resource group onde está o cluster AKS |
+| `AKS_CLUSTER_NAME` | Nome do cluster AKS |
 
-Além disso, o *environment* `fcg-production` (em *Pipelines > Environments*) é usado pela etapa de
-Deploy.
+Além disso, o *environment* `production` (em *Settings > Environments*) é usado pelos jobs de
+Imagem e Deploy. Se ele ainda não existir, o GitHub cria na primeira execução.
+
+### Como rodar manualmente
+
+- **Antes do merge:** o deploy de teste roda com um `git push` na branch `tech_fase_4`. O
+  GitHub só mostra o botão **Run workflow** depois que o arquivo do workflow existe na `main`;
+  por isso, até o merge, a `tech_fase_4` também dispara a esteira (provisório, sai depois do
+  merge).
+- **Depois do merge:** a esteira roda com push na `main` ou manualmente: abra a aba **Actions**
+  do repositório, escolha **CI/CD CatalogAPI** na lista à esquerda, clique em **Run workflow** e
+  confirme.
+
+Nos dois casos a execução faz o fluxo completo: build, testes, imagem e deploy no AKS.
 
 ---
 
@@ -512,9 +548,9 @@ Deploy.
   automático ou failover. Num ambiente real, o caminho natural seria trocar por serviços gerenciados.
 - O **scan de vulnerabilidades (Trivy)** da pipeline só **reporta** os problemas encontrados; ele
   não impede o deploy de uma imagem vulnerável (dá para mudar isso trocando `--exit-code 0` por
-  `--exit-code 1` no `azure-pipelines.yml`).
+  `--exit-code 1` no `.github/workflows/ci-cd.yml`).
 - Os **segredos não estão mais no código** (foram para `user-secrets`, Secret do Kubernetes e
-  Variable Groups do Azure DevOps — seções 4, 5 e 10), mas a mesma chave JWT continua
+  Secrets do GitHub Actions — seções 4, 5 e 10), mas a mesma chave JWT continua
   **compartilhada** com o serviço de Usuários, então trocar a chave exige atualizar os dois.
 - Compras duplicadas são barradas em **duas camadas**: (1) na entrada, o `POST /api/v1/purchases`
   recusa com `409` (`"Você já possui esse jogo em sua biblioteca."`) antes mesmo de publicar
